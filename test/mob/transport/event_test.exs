@@ -28,5 +28,13 @@ defmodule Mob.Transport.EventTest do
       assert Mob.Transport.normalize_event({:unknown, :event}) ==
                {:error, {:unknown_event, {:unknown, :event}}}
     end
+
+    test "rejects malformed frames with a typed reason" do
+      assert Mob.Transport.normalize_event({:frame, "peer", :not_binary}) ==
+               {:error, {:invalid_frame, :not_binary}}
+
+      assert Mob.Transport.normalize_event({:ble_frame, "peer", %{bad: true}}) ==
+               {:error, {:invalid_frame, %{bad: true}}}
+    end
   end
 end

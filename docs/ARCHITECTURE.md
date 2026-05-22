@@ -2,10 +2,16 @@
 
 `mob_transport` keeps transport integration intentionally atomic.
 
-```text
-mob
-└── Mob.Transport.Adapter
-    └── carrier transport process
+```mermaid
+flowchart TD
+    Mob[mob / router]
+    Adapter[Mob.Transport.Adapter]
+    Carrier[Carrier transport]
+
+    Mob -- send_frame / broadcast_frame --> Adapter
+    Adapter -- callback calls --> Carrier
+    Carrier -- carrier events --> Adapter
+    Adapter -- canonical events --> Mob
 ```
 
 ## Responsibilities
@@ -53,4 +59,25 @@ Unknown events are dropped by default and logged at debug level. Set
 
 ```elixir
 {:transport_error, {:unknown_event, event}}
+```
+
+## Telemetry Flow
+
+The adapter emits telemetry after the relevant operation is observed:
+
+```mermaid
+sequenceDiagram
+    participant Router
+    participant Adapter
+    participant Carrier
+    participant Telemetry
+
+    Router->>Adapter: send_frame(peer, frame)
+    Adapter->>Carrier: send_frame(pid, peer, frame, opts)
+    Carrier-->>Adapter: :ok
+    Adapter->>Telemetry: [:mob, :transport, :frame, :sent]
+
+    Carrier->>Adapter: {:frame, peer, frame}
+    Adapter->>Telemetry: [:mob, :transport, :frame, :received]
+    Adapter->>Router: {:frame, peer, frame}
 ```

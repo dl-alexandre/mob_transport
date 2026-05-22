@@ -23,6 +23,8 @@ defmodule Mob.Transport.FakeTransport do
 
   def emit(transport, event), do: GenServer.cast(transport, {:emit, event})
 
+  def crash(transport, reason \\ :boom), do: GenServer.cast(transport, {:crash, reason})
+
   def event_target(transport), do: GenServer.call(transport, :event_target)
 
   @impl true
@@ -50,6 +52,10 @@ defmodule Mob.Transport.FakeTransport do
   def handle_cast({:emit, event}, state) do
     send(state.event_target, event)
     {:noreply, state}
+  end
+
+  def handle_cast({:crash, reason}, state) do
+    {:stop, reason, state}
   end
 
   defp send_test_message(%{test_pid: nil}, _message), do: :ok

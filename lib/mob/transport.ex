@@ -27,7 +27,7 @@ defmodule Mob.Transport do
   @type metadata :: term()
   @type frame :: binary()
   @type event :: Event.t()
-  @type normalize_result :: {:ok, event()} | {:error, {:unknown_event, term()}}
+  @type normalize_result :: {:ok, event()} | {:error, Event.error()}
 
   @callback start_link(keyword()) :: GenServer.on_start()
   @callback send_frame(pid(), peer_id(), frame(), keyword()) :: :ok | {:error, term()}

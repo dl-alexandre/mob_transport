@@ -18,7 +18,9 @@ defmodule Mob.Transport.Event do
   @doc """
   Normalizes canonical and known carrier-specific event tuples.
   """
-  @spec normalize(term()) :: {:ok, t()} | {:error, {:unknown_event, term()}}
+  @type error :: {:unknown_event, term()} | {:invalid_frame, term()}
+
+  @spec normalize(term()) :: {:ok, t()} | {:error, error()}
   def normalize({:transport_up, _peer_id, _metadata} = event), do: {:ok, event}
   def normalize({:transport_down, _peer_id} = event), do: {:ok, event}
   def normalize({:frame, _peer_id, frame} = event) when is_binary(frame), do: {:ok, event}
@@ -29,6 +31,11 @@ defmodule Mob.Transport.Event do
 
   def normalize({:ble_frame, peer_id, frame}) when is_binary(frame),
     do: {:ok, {:frame, peer_id, frame}}
+
+  def normalize({event_name, _peer_id, frame})
+      when event_name in [:frame, :ble_frame] and not is_binary(frame) do
+    {:error, {:invalid_frame, frame}}
+  end
 
   def normalize(event), do: {:error, {:unknown_event, event}}
 end

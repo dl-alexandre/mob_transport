@@ -9,6 +9,8 @@ defmodule Mob.Transport.Adapter do
 
   use GenServer
 
+  alias Mob.Transport.Telemetry
+
   require Logger
 
   @type option ::
@@ -71,6 +73,8 @@ defmodule Mob.Transport.Adapter do
          {:ok, on_unknown_event} <- fetch_unknown_event_policy(opts),
          transport_opts = transport_opts(opts),
          {:ok, transport_pid} <- start_transport(transport, transport_opts) do
+      Logger.debug("Mob.Transport.Adapter started transport #{inspect(transport)}")
+
       {:ok,
        %{
          transport: transport,
@@ -84,6 +88,7 @@ defmodule Mob.Transport.Adapter do
   @impl true
   def handle_call({:send_frame, peer_id, frame, opts}, _from, state) do
     reply = state.transport.send_frame(state.transport_pid, peer_id, frame, opts)
+    emit_send_telemetry(reply, peer_id, frame, state)
     {:reply, reply, state}
   end
 
@@ -95,20 +100,31 @@ defmodule Mob.Transport.Adapter do
         {:error, :broadcast_not_supported}
       end
 
+    emit_send_telemetry(reply, :broadcast, frame, state)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_info({:EXIT, pid, reason}, %{transport_pid: pid} = state) do
+    Telemetry.emit(:error, %{count: 1}, %{
+      reason: {:transport_exit, reason},
+      transport: state.transport
+    })
+
+    Logger.warning(
+      "Mob.Transport.Adapter transport #{inspect(state.transport)} exited: #{inspect(reason)}"
+    )
+
     {:stop, {:transport_exit, reason}, state}
   end
 
   def handle_info(event, state) do
     case Mob.Transport.normalize_event(event) do
       {:ok, normalized} ->
+        emit_event_telemetry(normalized, state)
         send(state.event_target, normalized)
 
-      {:error, {:unknown_event, _unknown}} = error ->
+      {:error, _reason} = error ->
         handle_unknown_event(error, event, state)
     end
 
@@ -174,15 +190,73 @@ defmodule Mob.Transport.Adapter do
   end
 
   defp handle_unknown_event({:error, reason}, event, %{on_unknown_event: :forward_error} = state) do
+    Telemetry.emit(:error, %{count: 1}, %{
+      reason: reason,
+      event: event,
+      transport: state.transport
+    })
+
     send(state.event_target, {:transport_error, reason})
     Logger.debug("Mob.Transport.Adapter forwarded unknown event: #{inspect(event)}")
   end
 
-  defp handle_unknown_event({:error, reason}, event, %{on_unknown_event: :drop}) do
+  defp handle_unknown_event({:error, reason}, event, state) do
+    Telemetry.emit(:error, %{count: 1}, %{
+      reason: reason,
+      event: event,
+      transport: state.transport
+    })
+
     Logger.debug(
       "Mob.Transport.Adapter dropped unknown event #{inspect(event)}: #{inspect(reason)}"
     )
   end
+
+  defp emit_event_telemetry({:transport_up, peer_id, metadata}, state) do
+    Telemetry.emit(:up, %{count: 1}, %{
+      peer_id: peer_id,
+      metadata: metadata,
+      transport: state.transport
+    })
+  end
+
+  defp emit_event_telemetry({:transport_down, peer_id}, state) do
+    Telemetry.emit(:down, %{count: 1}, %{
+      peer_id: peer_id,
+      transport: state.transport
+    })
+  end
+
+  defp emit_event_telemetry({:frame, peer_id, frame}, state) do
+    Telemetry.emit([:frame, :received], %{bytes: byte_size(frame)}, %{
+      peer_id: peer_id,
+      transport: state.transport
+    })
+  end
+
+  defp emit_event_telemetry({:transport_error, reason}, state) do
+    Telemetry.emit(:error, %{count: 1}, %{
+      reason: reason,
+      transport: state.transport
+    })
+  end
+
+  defp emit_send_telemetry(:ok, peer_id, frame, state) do
+    Telemetry.emit([:frame, :sent], %{bytes: byte_size(frame)}, %{
+      peer_id: peer_id,
+      transport: state.transport
+    })
+  end
+
+  defp emit_send_telemetry({:error, reason}, peer_id, _frame, state) do
+    Telemetry.emit(:error, %{count: 1}, %{
+      reason: reason,
+      peer_id: peer_id,
+      transport: state.transport
+    })
+  end
+
+  defp emit_send_telemetry(_other, _peer_id, _frame, _state), do: :ok
 
   defp stop_transport(%{transport: transport, transport_pid: pid}) do
     cond do
