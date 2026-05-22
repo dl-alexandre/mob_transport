@@ -69,6 +69,7 @@ defmodule Mob.Transport.Adapter do
 
     with {:ok, transport} <- fetch_transport(opts),
          :ok <- ensure_callback(transport, :start_link, 1),
+         :ok <- ensure_callback(transport, :send_frame, 4),
          {:ok, event_target} <- fetch_event_target(opts),
          {:ok, on_unknown_event} <- fetch_unknown_event_policy(opts),
          transport_opts = transport_opts(opts),

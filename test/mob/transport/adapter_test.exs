@@ -3,6 +3,8 @@ defmodule Mob.Transport.AdapterTest do
 
   alias Mob.Transport.Adapter
   alias Mob.Transport.FakeTransport
+  alias Mob.Transport.MinimalTransport
+  alias Mob.Transport.MissingSendFrameTransport
 
   test "starts a transport with the adapter as the transport event target" do
     {:ok, adapter} = Adapter.start_link(transport: FakeTransport, event_target: self())
@@ -22,6 +24,52 @@ defmodule Mob.Transport.AdapterTest do
     assert_receive {:transport_up, "peer", %{name: "device"}}
     assert_receive {:frame, "peer", "hello"}
     assert_receive {:transport_down, "peer"}
+  end
+
+  test "echo-capable test transport exercises full send and receive flow" do
+    {:ok, adapter} =
+      Adapter.start_link(
+        transport: FakeTransport,
+        event_target: self(),
+        test_pid: self(),
+        echo?: true
+      )
+
+    assert :ok = Adapter.send_frame(adapter, "peer", "hello")
+
+    assert_receive {:sent_frame, "peer", "hello", []}
+    assert_receive {:frame, "peer", "hello"}
+  end
+
+  test "large binary frames flow through send and receive paths" do
+    large_frame = :crypto.strong_rand_bytes(256_000)
+
+    {:ok, adapter} =
+      Adapter.start_link(
+        transport: FakeTransport,
+        event_target: self(),
+        test_pid: self(),
+        echo?: true
+      )
+
+    assert :ok = Adapter.send_frame(adapter, "peer", large_frame)
+
+    assert_receive {:sent_frame, "peer", ^large_frame, []}
+    assert_receive {:frame, "peer", ^large_frame}
+  end
+
+  test "latency and failure injection return the underlying transport error" do
+    {:ok, adapter} =
+      Adapter.start_link(
+        transport: FakeTransport,
+        event_target: self(),
+        test_pid: self(),
+        latency_ms: 5,
+        send_reply: {:error, :offline}
+      )
+
+    assert {:error, :offline} = Adapter.send_frame(adapter, "peer", "payload")
+    assert_receive {:sent_frame, "peer", "payload", []}
   end
 
   test "emits telemetry for normalized events" do
@@ -57,6 +105,12 @@ defmodule Mob.Transport.AdapterTest do
     assert_receive {:broadcast_frame, "broadcast", ttl: 1}
   end
 
+  test "returns a clear error when broadcast is not implemented by the transport" do
+    {:ok, adapter} = Adapter.start_link(transport: MinimalTransport, event_target: self())
+
+    assert {:error, :broadcast_not_supported} = Adapter.broadcast_frame(adapter, "broadcast")
+  end
+
   test "emits telemetry for sent frames" do
     attach_telemetry([[:mob, :transport, :frame, :sent]])
 
@@ -81,6 +135,17 @@ defmodule Mob.Transport.AdapterTest do
     FakeTransport.emit(transport_pid, {:carrier_specific, :event})
 
     assert_receive {:transport_error, {:unknown_event, {:carrier_specific, :event}}}
+  end
+
+  test "drops malformed events without crashing by default" do
+    {:ok, adapter} = Adapter.start_link(transport: FakeTransport, event_target: self())
+    %{transport_pid: transport_pid} = :sys.get_state(adapter)
+
+    FakeTransport.emit(transport_pid, {:frame, "peer", :not_binary})
+    FakeTransport.emit(transport_pid, {:carrier_specific, :event})
+
+    refute_receive {:transport_error, _reason}, 50
+    assert Process.alive?(adapter)
   end
 
   test "forwards malformed frame errors when configured" do
@@ -108,6 +173,67 @@ defmodule Mob.Transport.AdapterTest do
     assert_receive {:EXIT, ^adapter, {:transport_exit, :boom}}
   after
     Process.flag(:trap_exit, false)
+  end
+
+  test "rejects transports missing required callbacks during startup" do
+    assert {:error, {:missing_callback, MissingSendFrameTransport, :send_frame, 4}} =
+             Adapter.start_link(transport: MissingSendFrameTransport, event_target: self())
+  end
+
+  test "multiple adapters dispatch events to their own event targets" do
+    parent = self()
+
+    target_a =
+      spawn_link(fn ->
+        send(parent, {:target_ready, :a, self()})
+
+        receive do
+          message -> send(parent, {:target_a_received, message})
+        end
+      end)
+
+    target_b =
+      spawn_link(fn ->
+        send(parent, {:target_ready, :b, self()})
+
+        receive do
+          message -> send(parent, {:target_b_received, message})
+        end
+      end)
+
+    assert_receive {:target_ready, :a, ^target_a}
+    assert_receive {:target_ready, :b, ^target_b}
+
+    {:ok, adapter_a} = Adapter.start_link(transport: FakeTransport, event_target: target_a)
+    {:ok, adapter_b} = Adapter.start_link(transport: FakeTransport, event_target: target_b)
+
+    %{transport_pid: transport_a} = :sys.get_state(adapter_a)
+    %{transport_pid: transport_b} = :sys.get_state(adapter_b)
+
+    FakeTransport.emit(transport_a, {:frame, "peer-a", "a"})
+    FakeTransport.emit(transport_b, {:frame, "peer-b", "b"})
+
+    assert_receive {:target_a_received, {:frame, "peer-a", "a"}}
+    assert_receive {:target_b_received, {:frame, "peer-b", "b"}}
+  end
+
+  test "handles high-frequency events and peer churn without losing canonical events" do
+    {:ok, adapter} = Adapter.start_link(transport: FakeTransport, event_target: self())
+    %{transport_pid: transport_pid} = :sys.get_state(adapter)
+
+    for index <- 1..50 do
+      peer = "peer-#{index}"
+      FakeTransport.emit(transport_pid, {:transport_up, peer, %{index: index}})
+      FakeTransport.emit(transport_pid, {:frame, peer, <<index::16>>})
+      FakeTransport.emit(transport_pid, {:transport_down, peer})
+    end
+
+    for index <- 1..50 do
+      peer = "peer-#{index}"
+      assert_receive {:transport_up, ^peer, %{index: ^index}}
+      assert_receive {:frame, ^peer, <<^index::16>>}
+      assert_receive {:transport_down, ^peer}
+    end
   end
 
   defp attach_telemetry(events) do

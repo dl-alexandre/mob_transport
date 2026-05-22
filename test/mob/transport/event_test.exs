@@ -36,5 +36,11 @@ defmodule Mob.Transport.EventTest do
       assert Mob.Transport.normalize_event({:ble_frame, "peer", %{bad: true}}) ==
                {:error, {:invalid_frame, %{bad: true}}}
     end
+
+    test "raises from normalize_event!/1 on malformed events" do
+      assert_raise ArgumentError, ~r/unknown transport event/, fn ->
+        Mob.Transport.normalize_event!({:frame, "peer", :not_binary})
+      end
+    end
   end
 end
